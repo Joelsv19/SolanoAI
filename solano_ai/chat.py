@@ -14,7 +14,7 @@ MAX_HISTORY_MESSAGES = 12
 
 # Solo utilizaremos resultados RAG suficientemente relacionados.
 RAG_MIN_SCORE = 0.82
-RAG_TOP_K = 1
+RAG_TOP_K = 3
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -283,10 +283,17 @@ def get_rag_context(
             f"Contenido: {result['text']}"
         )
 
-        if result["source"] not in sources:
-            sources.append(
-                result["source"]
-            )
+    if result.get("page") is not None:
+         source_label = (
+            f"{result['source']} — página {result['page']}"
+         )
+    else:
+        source_label = result["source"]
+
+    if source_label not in sources:
+     sources.append(
+        source_label
+    )
 
     context = "\n\n".join(
         context_parts
@@ -294,6 +301,74 @@ def get_rag_context(
 
     return context, sources
 
+
+def extract_rag_answer(user_message, result):
+    text = result["text"]
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    message = user_message.lower()
+
+    # Preguntas sobre los tres eventos
+    if (
+        "tres posibles eventos" in message
+        or "3 posibles eventos" in message
+        or "nombra los tres eventos" in message
+        or "nombra los 3 eventos" in message
+    ):
+        event_lines = [
+            line
+            for line in lines
+            if (
+                "evento a:" in line.lower()
+                or "evento b:" in line.lower()
+                or "evento c:" in line.lower()
+            )
+        ]
+
+        if event_lines:
+            return "\n".join(event_lines)
+
+    # Evento A
+    if "evento a" in message:
+        for line in lines:
+            if "evento a:" in line.lower():
+                return line
+
+    # Evento B
+    if "evento b" in message:
+        for line in lines:
+            if "evento b:" in line.lower():
+                return line
+
+    # Evento C
+    if "evento c" in message:
+        for line in lines:
+            if "evento c:" in line.lower():
+                return line
+
+    # Probabilidad conjunta B y C
+    if (
+        "b y c" in message
+        or "b y c" in message
+        or "probabilidad conjunta" in message
+    ):
+        for line in lines:
+            lower_line = line.lower()
+
+            if (
+                "b y c" in lower_line
+                and "0,05" in lower_line
+            ):
+                return line
+
+    # Si no encontramos un patrón específico,
+    # devolvemos el fragmento documental.
+    return text
 
 def generate_response(
     tokenizer,
@@ -303,6 +378,7 @@ def generate_response(
     user_memory,
     rag_system
 ):
+    # 1. Respuestas del sistema
     system_response = check_system_response(
         user_message
     )
@@ -310,6 +386,7 @@ def generate_response(
     if system_response is not None:
         return system_response, []
 
+    # 2. Respuestas desde memoria
     memory_response = check_memory_response(
         user_message,
         user_memory
@@ -318,46 +395,123 @@ def generate_response(
     if memory_response is not None:
         return memory_response, []
 
-    rag_context, sources = get_rag_context(
-        rag_system,
-        user_message
+    # 3. Buscar información documental
+    rag_results = rag_system.search(
+        user_message,
+        top_k=RAG_TOP_K
     )
 
-        # Modo RAG seguro:
-    # evitamos que el modelo pequeño invente información
-    # cuando existe una fuente documental.
-    if sources and rag_context:
-        top_results = rag_system.search(
+    relevant_results = [
+        result
+        for result in rag_results
+        if result["score"] >= RAG_MIN_SCORE
+    ]
+
+    # 4. Si encontramos información documental,
+    # usamos modo RAG seguro.
+    if relevant_results:
+        best_result = relevant_results[0]
+
+        source = best_result["source"]
+        page = best_result.get("page")
+
+        if page is not None:
+            source_label = (
+                f"{source} — página {page}"
+            )
+        else:
+            source_label = source
+
+        sources = [source_label]
+
+        message_lower = user_message.lower()
+        document_lower = best_result["text"].lower()
+
+        # Evitar inventar edades
+        if (
+            "cuántos años" in message_lower
+            or "cuantos años" in message_lower
+            or "qué edad" in message_lower
+            or "que edad" in message_lower
+        ):
+            if (
+                "años" not in document_lower
+                and "edad" not in document_lower
+            ):
+                return (
+                    "No encuentro esa información "
+                    "en mis documentos.",
+                    sources
+                )
+
+        answer = extract_rag_answer(
             user_message,
-            top_k=1
+            best_result
         )
 
-        if top_results:
-            best_result = top_results[0]
-            document_text = best_result["text"]
+        return answer, sources
 
-            message_lower = user_message.lower()
-            document_lower = document_text.lower()
+    # 5. Si el RAG no encontró información relevante,
+    # usamos el modelo de lenguaje.
+    memory_text = "\n".join(
+        f"- {key}: {value}"
+        for key, value
+        in user_memory.items()
+    )
 
-            # Preguntas sobre edad requieren información
-            # explícita relacionada con edad.
-            if (
-                "cuántos años" in message_lower
-                or "cuantos años" in message_lower
-                or "qué edad" in message_lower
-                or "que edad" in message_lower
-            ):
-                if (
-                    "años" not in document_lower
-                    and "edad" not in document_lower
-                ):
-                    return (
-                        "No encuentro esa información "
-                        "en mis documentos.",
-                        sources
-                    )
+    if not memory_text:
+        memory_text = "Sin datos todavía."
 
-            return document_text, sources
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                SYSTEM_PROMPT
+                + "\n\nMEMORIA DEL USUARIO:\n"
+                + memory_text
+            )
+        }
+    ]
+
+    messages.extend(history)
+
+    messages.append(
+        {
+            "role": "user",
+            "content": user_message
+        }
+    )
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    inputs = tokenizer(
+        text,
+        return_tensors="pt"
+    ).to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=100,
+            do_sample=False
+        )
+
+    generated_tokens = outputs[0][
+        inputs["input_ids"].shape[1]:
+    ]
+
+    response = tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True
+    )
+
+    # IMPORTANTE:
+    # siempre devolvemos respuesta + lista de fuentes.
+    return response, []
 
 def main():
     tokenizer, model = load_model()

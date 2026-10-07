@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 
 
@@ -31,27 +32,13 @@ class RAGSystem:
             exist_ok=True
         )
 
+        # Cargar archivos TXT
         for file_path in KNOWLEDGE_DIR.glob("*.txt"):
-            content = file_path.read_text(
-                encoding="utf-8"
-            )
+            self.load_txt_file(file_path)
 
-            document_chunks = self.split_text(content)
-
-            document_name = (
-                file_path.stem
-                .replace("_", " ")
-                .strip()
-            )
-
-            for chunk in document_chunks:
-                self.chunks.append(
-                    {
-                        "text": chunk,
-                        "source": file_path.name,
-                        "document_name": document_name
-                    }
-                )
+        # Cargar archivos PDF
+        for file_path in KNOWLEDGE_DIR.glob("*.pdf"):
+            self.load_pdf_file(file_path)
 
         if not self.chunks:
             print(
@@ -63,8 +50,22 @@ class RAGSystem:
         passages = []
 
         for chunk in self.chunks:
+            document_name = (
+                Path(chunk["source"])
+                .stem
+                .replace("_", " ")
+            )
+
+            page_text = ""
+
+            if chunk["page"] is not None:
+                page_text = (
+                    f" Página {chunk['page']}."
+                )
+
             passage = (
-                f"passage: Documento {chunk['document_name']}. "
+                f"passage: Documento {document_name}."
+                f"{page_text} "
                 f"{chunk['text']}"
             )
 
@@ -79,67 +80,162 @@ class RAGSystem:
             f"RAG: {len(self.chunks)} fragmentos indexados."
         )
 
-    def split_text(self, text, chunk_size=300):
-        paragraphs = [
-            paragraph.strip()
-            for paragraph in text.split("\n")
-            if paragraph.strip()
-        ]
+    def load_txt_file(self, file_path):
+        try:
+            content = file_path.read_text(
+                encoding="utf-8"
+            )
 
-        chunks = []
+            document_chunks = self.split_text(
+                content
+            )
 
-        for paragraph in paragraphs:
+            for chunk in document_chunks:
+                self.chunks.append(
+                    {
+                        "text": chunk,
+                        "source": file_path.name,
+                        "page": None
+                    }
+                )
 
-            if len(paragraph) <= chunk_size:
-                chunks.append(paragraph)
-                continue
+            print(
+                f"TXT cargado: {file_path.name}"
+            )
 
-            sentences = paragraph.split(". ")
+        except Exception as error:
+            print(
+                f"Error leyendo {file_path.name}: "
+                f"{error}"
+            )
 
-            current_chunk = ""
+    def load_pdf_file(self, file_path):
+        try:
+            reader = PdfReader(
+                str(file_path)
+            )
 
-            for sentence in sentences:
-                sentence = sentence.strip()
+            pages_loaded = 0
 
-                if not sentence:
+            for page_number, page in enumerate(
+                reader.pages,
+                start=1
+            ):
+                text = page.extract_text()
+
+                if not text:
                     continue
 
-                candidate = (
-                    current_chunk
-                    + sentence
-                    + ". "
+                text = text.strip()
+
+                if not text:
+                    continue
+
+                document_chunks = self.split_text(
+                    text
                 )
 
-                if len(candidate) <= chunk_size:
-                    current_chunk = candidate
+                for chunk in document_chunks:
+                    self.chunks.append(
+                        {
+                            "text": chunk,
+                            "source": file_path.name,
+                            "page": page_number
+                        }
+                    )
 
-                else:
-                    if current_chunk:
-                        chunks.append(
-                            current_chunk.strip()
-                        )
+                pages_loaded += 1
 
-                    current_chunk = sentence + ". "
+            print(
+                f"PDF cargado: {file_path.name} "
+                f"({pages_loaded} páginas con texto)"
+            )
 
-            if current_chunk:
-                chunks.append(
-                    current_chunk.strip()
+        except Exception as error:
+            print(
+                f"Error leyendo PDF "
+                f"{file_path.name}: {error}"
+            )
+
+    def split_text(
+        self,
+        text,
+        chunk_size=900,
+        overlap=180
+    ):
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+        ]
+
+        if not lines:
+            return []
+
+        chunks = []
+        current_chunk = ""
+
+        for line in lines:
+            candidate = (
+                current_chunk + "\n" + line
+                if current_chunk
+                else line
+            )
+
+            if len(candidate) <= chunk_size:
+                current_chunk = candidate
+
+            else:
+                if current_chunk:
+                    chunks.append(
+                        current_chunk.strip()
+                    )
+
+                previous_text = (
+                    current_chunk[-overlap:]
+                    if current_chunk
+                    else ""
                 )
+
+                current_chunk = (
+                    previous_text + "\n" + line
+                    if previous_text
+                    else line
+                )
+
+        if current_chunk:
+            chunks.append(
+                current_chunk.strip()
+            )
 
         return chunks
 
-    def search(self, query, top_k=3):
-        if not self.chunks or self.embeddings is None:
+    def search(
+        self,
+        query,
+        top_k=3
+    ):
+        if (
+            not self.chunks
+            or self.embeddings is None
+        ):
             return []
 
-        formatted_query = f"query: {query}"
+        formatted_query = (
+            f"query: {query}"
+        )
 
-        query_embedding = self.embedding_model.encode(
-            [formatted_query],
-            normalize_embeddings=True
-        )[0]
+        query_embedding = (
+            self.embedding_model.encode(
+                [formatted_query],
+                normalize_embeddings=True
+            )[0]
+        )
 
-        scores = self.embeddings @ query_embedding
+        scores = (
+            self.embeddings
+            @ query_embedding
+        )
 
         ranked_indices = (
             scores.argsort()[::-1][:top_k]
@@ -150,9 +246,17 @@ class RAGSystem:
         for index in ranked_indices:
             results.append(
                 {
-                    "text": self.chunks[index]["text"],
-                    "source": self.chunks[index]["source"],
-                    "score": float(scores[index])
+                    "text":
+                        self.chunks[index]["text"],
+
+                    "source":
+                        self.chunks[index]["source"],
+
+                    "page":
+                        self.chunks[index]["page"],
+
+                    "score":
+                        float(scores[index])
                 }
             )
 
