@@ -26,6 +26,7 @@ class RAGSystem:
 
     def load_documents(self):
         self.chunks = []
+        self.embeddings = None
 
         KNOWLEDGE_DIR.mkdir(
             parents=True,
@@ -209,6 +210,49 @@ class RAGSystem:
             )
 
         return chunks
+
+    def reload_documents(self):
+         print("\nRecargando base de conocimiento...")
+
+         self.load_documents()
+ 
+         return self.get_documents_info()
+
+
+    def get_documents_info(self):
+        documents = {}
+
+        for chunk in self.chunks:
+            source = chunk["source"]
+            page = chunk.get("page")
+
+            if source not in documents:
+                documents[source] = {
+                    "source": source,
+                    "chunks": 0,
+                    "pages": set()
+                }
+
+            documents[source]["chunks"] += 1
+
+            if page is not None:
+                documents[source]["pages"].add(page)
+
+        results = []
+
+        for document in documents.values():
+            results.append(
+                {
+                    "source": document["source"],
+                    "chunks": document["chunks"],
+                    "pages": len(document["pages"])
+                }
+            )
+
+        return sorted(
+            results,
+            key=lambda item: item["source"].lower()
+        )
 
     def search(
         self,

@@ -466,7 +466,7 @@ def generate_response(
         {
             "role": "system",
             "content": (
-                SYSTEM_PROMPT
+                SSYSTEM_PROMPT
                 + "\n\nMEMORIA DEL USUARIO:\n"
                 + memory_text
             )
@@ -522,8 +522,10 @@ def main():
 
     user_memory = load_user_memory()
 
-    print("\nSolanoAI V0.4")
-    print("Memoria persistente + RAG activados.")
+    print("\nSolanoAI V0.5.1")
+    print(
+        "Memoria persistente + RAG + documentos activados."
+    )
 
     if user_memory:
         print(
@@ -532,14 +534,17 @@ def main():
         )
 
     print("\nComandos:")
-    print("  salir     -> cerrar")
-    print("  /limpiar  -> borrar memoria")
-    print("  /memoria  -> mostrar memoria")
+    print("  salir        -> cerrar")
+    print("  /limpiar     -> borrar memoria")
+    print("  /memoria     -> mostrar memoria")
+    print("  /documentos  -> mostrar documentos cargados")
+    print("  /recargar    -> recargar documentos")
     print()
 
     while True:
         message = input("Tú: ").strip()
 
+        # Cerrar SolanoAI
         if message.lower() in [
             "salir",
             "exit",
@@ -550,6 +555,7 @@ def main():
             )
             break
 
+        # Limpiar memoria
         if message.lower() == "/limpiar":
             history.clear()
             user_memory.clear()
@@ -561,23 +567,59 @@ def main():
             )
             continue
 
-        if message.lower() == "/memoria":
-            print(
-                "\nMemoria persistente "
-                "de SolanoAI:"
+        # Mostrar memoria
+        if message.lower() == "/recargar":
+           documents = rag_system.reload_documents()
+
+           print(
+            "\nSolanoAI: Base de conocimiento "
+            "recargada correctamente."
+           )
+  
+           print(
+           f"Documentos disponibles: "
+           f"{len(documents)}\n"
+           )
+
+           continue
+
+        # Mostrar documentos cargados
+        if message.lower() == "/documentos":
+            documents = (
+                rag_system.get_documents_info()
             )
 
-            if not user_memory:
-                print("Sin datos.")
+            print(
+                "\nDocumentos cargados "
+                "en SolanoAI:"
+            )
 
-            for key, value in user_memory.items():
+            if not documents:
                 print(
-                    f"- {key}: {value}"
+                    "No hay documentos cargados."
                 )
+
+            for document in documents:
+                source = document["source"]
+                chunks = document["chunks"]
+                pages = document["pages"]
+
+                if source.lower().endswith(".pdf"):
+                    print(
+                        f"- {source} | "
+                        f"{pages} páginas | "
+                        f"{chunks} fragmentos"
+                    )
+                else:
+                    print(
+                        f"- {source} | "
+                        f"{chunks} fragmentos"
+                    )
 
             print()
             continue
 
+        # Actualizar memoria del usuario
         changed = update_user_memory(
             message,
             user_memory
@@ -588,6 +630,7 @@ def main():
                 user_memory
             )
 
+        # Generar respuesta
         response, sources = generate_response(
             tokenizer,
             model,
@@ -597,6 +640,7 @@ def main():
             rag_system
         )
 
+        # Guardar historial
         history.append(
             {
                 "role": "user",
